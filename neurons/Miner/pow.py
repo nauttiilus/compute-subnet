@@ -49,7 +49,23 @@ def hashcat_verify(_hash, output) -> Union[str, None]:
     return None
 
 
-# no longer a FIFO
+def get_available_vram():
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            free_memory = int(result.stdout.strip().split('\n')[0])
+            return free_memory * 1024 * 1024  # Convert MB to bytes
+        else:
+            return None
+    except Exception as e:
+        bt.logging.warning(f"Error checking VRAM: {e}")
+        return None
+
+
 def run_hashcat(
     run_id: str,
     _hash: str,
@@ -93,7 +109,21 @@ def run_hashcat(
         bt.logging.info(f"{run_id}: ♻️  Challenge processing")
 
     unknown_error_message = f"{run_id}: ❌ run_hashcat execution failed"
+
     try:
+        # Check available vram before running Hashcat
+        available_vram = get_available_vram()
+        required_vram = compute.pow_min_free_vram
+        if available_vram is not None and available_vram < required_vram:
+            error_message = f"{run_id}: ❌ Not enough VRAM available to run Hashcat (Available: {available_vram} bytes)"
+            bt.logging.warning(error_message)
+            queue.popleft()
+            return {
+                "password": None,
+                "local_execution_time": execution_time,
+                "error": error_message,
+            }
+
         command = [
             hashcat_path,
             f"{_hash}:{salt}",
@@ -204,7 +234,7 @@ def run_miner_pow(
     mask: str,
     hashcat_path: str = compute.miner_hashcat_location,
     hashcat_workload_profile: str = compute.miner_hashcat_workload_profile,
-    hashcat_extended_options: str = "",
+    hashcat_extended_options: str = compute.miner_hashcat_extended_options,
 ):
     bt.logging.info(f"{run_id}: 💻 Challenge received")
 
