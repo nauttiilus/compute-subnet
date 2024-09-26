@@ -196,9 +196,6 @@ class Validator:
         # Initialize penalized_hotkeys as an empty list
         self.penalized_hotkeys = []
 
-        # Initialize penalized_hotkeys_checklist as an empty list
-        self.penalized_hotkeys_checklist = []
-
         # Init the thread.
         self.lock = threading.Lock()
         self.threads: List[threading.Thread] = []
@@ -278,40 +275,14 @@ class Validator:
 
             bt.logging.trace(log)
 
-    def update_allocation_wandb(self):
-        hotkey_list = []
-        # Instantiate the connection to the db
-        cursor = self.db.get_cursor()
-        try:
-            # Retrieve all records from the allocation table
-            cursor.execute("SELECT id, hotkey, details FROM allocation")
-            rows = cursor.fetchall()
-            for row in rows:
-                id, hotkey, details = row
-                hotkey_list.append(hotkey)
-        except Exception as e:
-            bt.logging.info(f"An error occurred while retrieving allocation details: {e}")
-        finally:
-            cursor.close()
-            # self.db.close()
-
-        # WandB update should be outside of DB try-finally block since it's independent
-        try:
-            self.wandb.update_allocated_hotkeys(hotkey_list)
-        except Exception as e:
-            bt.logging.info(f"Error updating wandb : {e}")
-
     def sync_scores(self):
         # Fetch scoring stats
         self.stats = select_challenge_stats(self.db)
 
         valid_validator_hotkeys = self.get_valid_validator_hotkeys()
 
-        self.update_allocation_wandb()
-
         # Fetch allocated hotkeys
         self.allocated_hotkeys = self.wandb.get_allocated_hotkeys(valid_validator_hotkeys, True)
-        # bt.logging.info(f"Allocated hotkeys: {self.allocated_hotkeys}")
 
         # Fetch penalized hotkeys
         self.penalized_hotkeys = self.wandb.get_penalized_hotkeys(valid_validator_hotkeys, True)
@@ -348,8 +319,7 @@ class Validator:
                                     validator_hotkeys = valid_validator_hotkeys)
 
                 self.stats[uid]["score"] = score
-            except (ValueError, KeyError) as e:
-                # bt.logging.error(f"Error calculating score for hotkey {hotkey}: {e}")
+            except (ValueError, KeyError):
                 score = 0
 
             self.scores[uid] = score
@@ -386,26 +356,9 @@ class Validator:
         current_version = __version_as_int__
         if subnet_prometheus_version != current_version:
             self.init_prometheus(force_update=True)
-    def remove_duplicate_penalized_hotkeys(self):
-        """
-        Removes any duplicate entries in the penalized_hotkeys_checklist
-        based on the 'hotkey' field.
-        """
-        seen = set()
-        unique_penalized_list = []
-
-        for item in self.penalized_hotkeys_checklist:
-            if item['hotkey'] not in seen:
-                unique_penalized_list.append(item)
-                seen.add(item['hotkey'])
-
-        self.penalized_hotkeys_checklist = unique_penalized_list
-        bt.logging.info("Removed duplicate hotkeys from penalized_hotkeys_checklist.")
 
     def sync_checklist(self):
-        self.penalized_hotkeys_checklist = self.wandb.get_penalized_hotkeys_checklist(self.get_valid_validator_hotkeys(), True)
         self.threads = []
-        self.penalized_hotkeys_checklist = self.wandb.get_penalized_hotkeys_checklist(self.get_valid_validator_hotkeys(), True)
         for i in range(0, len(self.uids), self.validator_challenge_batch_size):
             for _uid in self.uids[i : i + self.validator_challenge_batch_size]:
                 try:
@@ -420,15 +373,12 @@ class Validator:
                     )
                 except KeyError:
                     continue
-        self.remove_duplicate_penalized_hotkeys()
 
         for thread in self.threads:
             thread.start()
-
+        
         for thread in self.threads:
             thread.join()
-
-        self.wandb.update_penalized_hotkeys_checklist(self.penalized_hotkeys_checklist)
 
     def sync_miners_info(self, queryable_tuple_uids_axons: List[Tuple[int, bt.AxonInfo]]):
         if queryable_tuple_uids_axons:
@@ -612,52 +562,49 @@ class Validator:
     def execute_miner_checking_request(self, uid, axon: bt.AxonInfo):
         dendrite = bt.dendrite(wallet=self.wallet)
         bt.logging.info(f"Querying for {Allocate.__name__} - {uid}/{axon.hotkey}")
+
         response = dendrite.query(axon, Allocate(timeline=1, checking=True), timeout=30)
         port = response.get("port", "")
         status = response.get("status", False)
-        checklist_hotkeys = [item['hotkey'] for item in self.penalized_hotkeys_checklist]
-        if port:
-            if not status:
-                is_port_open = check_port(axon.ip, port)
-                if (axon.hotkey not in checklist_hotkeys )and (not is_port_open):
-                    self.penalized_hotkeys_checklist.append({"hotkey": axon.hotkey, "status_code": "PORT_CLOSED", "description": "The port of ssh server is closed"})
-                    bt.logging.info(
-                        f"Debug {Allocate.__name__} - status of Checking allocation - {status} {uid} - Port is closed and not usable, even though it has been allocated."
-                    )
-                else:
-                    bt.logging.info(f"Debug {Allocate.__name__} - status of Checking allocation - {status} {uid} - Port is open and the miner is allocated")
-            else:
-                is_ssh_access = True
-                allocation_status = False
-                private_key, public_key = rsa.generate_key_pair()
-                device_requirement = {"cpu": {"count": 1}, "gpu": {}, "hard_disk": {"capacity": 1073741824}, "ram": {"capacity": 1073741824}}
-                try:
-                    response = dendrite.query(axon, Allocate(timeline=1, device_requirement=device_requirement, checking=False, public_key=public_key), timeout=60)
-                    if response and response["status"] is True:
-                        allocation_status = True
-                        bt.logging.info(f"Debug {Allocate.__name__} - Successfully Allocated - {uid}")
-                        private_key = private_key.encode("utf-8")
-                        decrypted_info_str = rsa.decrypt_data(private_key, base64.b64decode(response["info"]))
-                        info = json.loads(decrypted_info_str)
-                        is_ssh_access = check_ssh_login(axon.ip, port, info['username'], info['password'])
-                except Exception as e:
-                    bt.logging.error(f"{e}")
 
-                max_retry = 0
-                while allocation_status and max_retry < 3:
+        if port:
+            is_port_open = check_port(axon.ip, port)
+            penalized_hotkeys_checklist = self.wandb.get_penalized_hotkeys_checklist(self.get_valid_validator_hotkeys(), True)
+            checklist_hotkeys = [item['hotkey'] for item in penalized_hotkeys_checklist]
+
+            if is_port_open:
+                is_ssh_access = True
+                bt.logging.info(f"Debug {Allocate.__name__} - status of Checking allocation - {status} {uid}")
+                if status is True: # if it's able to check allocation
+                    private_key, public_key = rsa.generate_key_pair()
+                    device_requirement = {"cpu": {"count": 1}, "gpu": {}, "hard_disk": {"capacity": 1073741824}, "ram": {"capacity": 1073741824}}
+                    
+                    try:
+                        response = dendrite.query(axon, Allocate(timeline=1, device_requirement=device_requirement, checking=False, public_key=public_key), timeout=60)
+                        if response and response["status"] is True:
+                            bt.logging.info(f"Debug {Allocate.__name__} - Successfully Allocated - {uid}")
+                            private_key = private_key.encode("utf-8")
+                            decrypted_info_str = rsa.decrypt_data(private_key, base64.b64decode(response["info"]))
+                            info = json.loads(decrypted_info_str)
+                            is_ssh_access = check_ssh_login(axon.ip, port, info['username'], info['password'])
+                    except Exception as e:
+                        bt.logging.error(f"{e}")
+                        return
+
                     deregister_response = dendrite.query(axon, Allocate(timeline=0, checking=False, public_key=public_key), timeout=60)
                     if deregister_response and deregister_response["status"] is True:
                         bt.logging.info(f"Debug {Allocate.__name__} - Deallocated - {uid}")
-                        break
-                    else:
-                        bt.logging.error(f"Debug {Allocate.__name__} - Failed to deallocate - {uid} will retry in 5 seconds")
-                        max_retry += 1
-                        time.sleep(5)
+
+
                 if axon.hotkey in checklist_hotkeys:
-                    self.penalized_hotkeys_checklist = [item for item in self.penalized_hotkeys_checklist if item['hotkey'] != axon.hotkey]
+                    penalized_hotkeys_checklist = [item for item in penalized_hotkeys_checklist if item['hotkey'] != axon.hotkey]
                 if not is_ssh_access:
-                    bt.logging.info(f"Debug {Allocate.__name__} - status of Checking allocation - {status} {uid} - SSH access is disabled")
-                    self.penalized_hotkeys_checklist.append({"hotkey": axon.hotkey, "status_code": "SSH_ACCESS_DISABLED", "description": "It can not access to the server via ssh"})               
+                    penalized_hotkeys_checklist.append({"hotkey": axon.hotkey, "status_code": "SSH_ACCESS_DISABLED", "description": "It can not access to the server via ssh"})           
+            else:
+                if axon.hotkey not in checklist_hotkeys:
+                    penalized_hotkeys_checklist.append({"hotkey": axon.hotkey, "status_code": "PORT_CLOSED", "description": "The port of ssh server is closed"})
+
+            self.wandb.update_penalized_hotkeys_checklist(penalized_hotkeys_checklist)
 
     def execute_specs_request(self):
         if len(self.queryable_for_specs) > 0:
@@ -739,11 +686,11 @@ class Validator:
             bt.logging.info(f"{hotkey} - {specs}")
         """
         self.finalized_specs_once = True
-
+    
     def get_specs_wandb(self):
 
         bt.logging.info(f"💻 Hardware list of uids queried (Wandb): {list(self._queryable_uids.keys())}")
-
+     
         specs_dict = self.wandb.get_miner_specs(self._queryable_uids) 
         # Update the local db with the data from wandb
         update_miner_details(self.db, list(specs_dict.keys()), list(specs_dict.values()))
@@ -886,12 +833,12 @@ class Validator:
                     # Perform miner checking
                     if self.current_block % block_next_miner_checking == 0 or block_next_miner_checking < self.current_block:
                         # Next block the validators will do port checking again.
-                        block_next_miner_checking = self.current_block + 50  # 300 -> every 60 minutes
+                        block_next_miner_checking = self.current_block + 50  # 50 -> every 10 minutes
 
                         # Filter axons with stake and ip address.
                         self._queryable_uids = self.get_queryable()
 
-                        # self.sync_checklist()
+                        #self.sync_checklist()
 
                     if self.current_block % block_next_sync_status == 0 or block_next_sync_status < self.current_block:
                         block_next_sync_status = self.current_block + 25  # ~ every 5 minutes

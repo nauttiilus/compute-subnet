@@ -113,7 +113,7 @@ def calc_score(response, hotkey, allocated_hotkeys, penalized_hotkeys, validator
                 final_score = final_score/2
 
         if (last_20_challenge_failed >= 19 or challenge_successes == 0) and not allocation_status:
-            return 0
+            final_score = 0
 
         # Penalize miners if their hotkey is in the penalized_hotkeys list
         if hotkey in penalized_hotkeys:
@@ -133,6 +133,7 @@ def calc_score(response, hotkey, allocated_hotkeys, penalized_hotkeys, validator
 
         # Normalize the score
         normalized_score = normalize(final_score, 0, max_score)
+        bt.logging.info(f"Hotkey: {hotkey}, Normalized Score: {normalized_score}")
         return normalized_score
     except Exception as e:
         bt.logging.error(f"An error occurred while calculating score for the following hotkey - {hotkey}: {e}")
