@@ -2877,8 +2877,8 @@ class RegisterAPI:
                     info = json.loads(details)
                     uuid_key = info.get("uuid")
 
-                    # Check if hotkey exists in self.metagraph.hotkeys
-                    if hotkey in self.metagraph.hotkeys:
+                    # Check if hotkey exists in self.metagraph.hotkeys and uuid_key is valid
+                    if hotkey in self.metagraph.hotkeys and uuid_key:
                         index = self.metagraph.hotkeys.index(hotkey)
                         axon = self.metagraph.axons[index]
 

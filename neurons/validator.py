@@ -343,10 +343,10 @@ class Validator:
                 self.stats[uid]["score"] = score
 
             except KeyError as e:
-                # bt.logging.info(f"KeyError occurred for UID {uid}: {str(e)}")
+                bt.logging.info(f"KeyError occurred for UID {uid}: {str(e)}")
                 score = 0
             except Exception as e:
-                # bt.logging.info(f"An unexpected exception occurred for UID {uid}: {str(e)}")
+                bt.logging.info(f"An unexpected exception occurred for UID {uid}: {str(e)}")
                 score = 0
 
             self.scores[uid] = score
