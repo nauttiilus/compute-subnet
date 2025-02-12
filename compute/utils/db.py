@@ -68,6 +68,18 @@ class ComputeDb:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS miner_reliability_score (
+                    id INTEGER PRIMARY KEY,
+                    hotkey TEXT UNIQUE,
+                    reliability_score REAL,
+                    details TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
 
             self.conn.commit()
         except Exception as e:

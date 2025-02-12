@@ -19,6 +19,7 @@ import json
 from typing import Tuple, Any
 
 import bittensor as bt
+from datetime import datetime, timedelta
 
 from compute.utils.db import ComputeDb
 
@@ -288,3 +289,132 @@ def allocate_check_if_miner_meet(details, required_details):
         bt.logging.error("The format is wrong, please check it again.")
         return False
     return True
+
+def upsert_miner_reliability_score(hotkey, score, details=None):
+    """
+    Inserts or updates the reliability_score (0.0 - 1.0) and optional details
+    for the given hotkey in miner_reliability_score.
+    """
+    db = ComputeDb()
+    cursor = db.get_cursor()
+
+    # Optional: clamp the score between 0.0 and 1.0
+    if not (0.0 <= score <= 1.0):
+        bt.logging.warning(
+            f"Score {score} is out of range (0.0-1.0). Clamping to valid range."
+        )
+        score = max(0.0, min(1.0, score))
+
+    # Default to empty string if no details provided
+    if details is None:
+        details = ""
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO miner_reliability_score (hotkey, reliability_score, details, created_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(hotkey) DO UPDATE
+            SET reliability_score = excluded.reliability_score,
+                details = excluded.details,
+                created_at = CURRENT_TIMESTAMP
+            """,
+            (hotkey, score, details)
+        )
+        db.conn.commit()
+    except Exception as e:
+        db.conn.rollback()
+        bt.logging.error(
+            f"Failed to upsert miner reliability score for hotkey '{hotkey}': {e}"
+        )
+    finally:
+        cursor.close()
+
+def reset_miner_reliability_score(hours=24):
+    """
+    Sets reliability_score = 1.0 for any hotkey entry older than `hours`,
+    and updates created_at to CURRENT_TIMESTAMP for those rows.
+
+    :param hours: Number of hours after which the reliability score is reset.
+    """
+    db = ComputeDb()
+    cursor = db.get_cursor()
+    try:
+        threshold_time = datetime.now() - timedelta(hours=hours)
+        cursor.execute(
+            """
+            UPDATE miner_reliability_score
+            SET reliability_score = 1.0,
+                created_at = CURRENT_TIMESTAMP
+            WHERE datetime(created_at) < datetime(?)
+            """,
+            (threshold_time,),
+        )
+        db.conn.commit()
+    except Exception as e:
+        db.conn.rollback()
+        bt.logging.error(f"Failed to reset reliability scores after {hours} hours: {e}")
+    finally:
+        cursor.close()
+
+def reset_miner_reliability_score_hotkey(hotkey, hours=24):
+    """
+    Resets the reliability_score to 1.0 for the given hotkey if it is older
+    than the specified number of hours. Updates created_at to CURRENT_TIMESTAMP.
+    """
+    db = ComputeDb()
+    cursor = db.get_cursor()
+    try:
+        threshold_time = datetime.now() - timedelta(hours=hours)
+        cursor.execute(
+            """
+            UPDATE miner_reliability_score
+            SET reliability_score = 1.0,
+                created_at = CURRENT_TIMESTAMP
+            WHERE hotkey = ?
+              AND datetime(created_at) < datetime(?)
+            """,
+            (hotkey, threshold_time),
+        )
+        updated_count = cursor.rowcount  # Number of rows updated
+        db.conn.commit()
+
+        if updated_count == 0:
+            bt.logging.info(
+                f"No reliability score reset for hotkey '{hotkey}' — "
+                f"either not found or newer than {hours} hours."
+            )
+    except Exception as e:
+        db.conn.rollback()
+        bt.logging.error(
+            f"Failed to reset reliability score for hotkey '{hotkey}' "
+            f"after {hours} hours: {e}"
+        )
+    finally:
+        cursor.close()
+
+def get_miner_reliability_score(hotkey):
+    """
+    Retrieves the reliability_score for the specified hotkey from
+    the miner_reliability_score table. Returns 1.0 if not found or on error.
+    """
+    db = ComputeDb()
+    cursor = db.get_cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT reliability_score
+            FROM miner_reliability_score
+            WHERE hotkey = ?
+            """,
+            (hotkey,),
+        )
+        row = cursor.fetchone()
+        return row[0] if row else 1.0
+    except Exception as e:
+        db.conn.rollback()
+        #bt.logging.info(f"No reliability score for hotkey '{hotkey}': {e}")
+        return 1.0
+    finally:
+        cursor.close()
+

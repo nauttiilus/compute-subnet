@@ -8,6 +8,7 @@ from collections import Counter
 
 from dotenv import load_dotenv
 from compute.utils.db import ComputeDb
+from neurons.Validator.database.allocate import get_miner_reliability_score
 from neurons.Validator.database.pog import retrieve_stats, write_stats
 from neurons.Validator.script import get_perf_info
 
@@ -18,7 +19,7 @@ PUBLIC_WANDB_ENTITY = "neuralinternet"
 class ComputeWandb:
     run = None
 
-    def __init__(self, config: bt.config, wallet: bt.wallet, role: str):
+    def __init__(self, config: bt.config, wallet: bt.wallet, role: str): # type: ignore
         self.config = config.copy()
 
         keys_to_delete = ["logging", "wallet", "full_path", "axon"]
@@ -209,6 +210,11 @@ class ComputeWandb:
                 data["allocated"] = True  # Mark as allocated if the hotkey is in the list
             else:
                 data["allocated"] = False  # Mark as not allocated if the hotkey is not in the list
+
+        # Update the reliability score based on the reliability db
+        for uid, data in stats.items():
+            reliability_score = get_miner_reliability_score(hotkey)
+            data["reliability_score"] = reliability_score
 
         # Write the updated stats back to the database
         write_stats(self.db, stats)
@@ -441,6 +447,39 @@ class ComputeWandb:
 
         return final_stats_int_keys
 
+    def get_reliability_scores(self, run_path):
+        """
+        Aggregates stats from all validator runs on wandb, returning a dict keyed by UID.
+        Only includes entries where 'own_score' == True (and optionally 'allocated' == True).
+        Then picks one 'dominant' entry per UID and preserves all fields (e.g., allocated).
+        """
+
+        try:
+            # Ensure API is flushed before fetching new runs
+            self.api.flush()
+
+            # Fetch the run using the provided path
+            run = self.api.run(run_path)
+            if not run:
+                raise ValueError(f"Run not found: {run_path}")
+
+            # Extract stats data
+            run_config = run.config
+            stats_data = run_config.get("stats", {})
+
+            # Initialize reliability scores dictionary
+            reliability_scores = {}
+
+            for uid, data in stats_data.items():
+                if isinstance(data, dict):
+                    reliability_scores[uid] = data.get("reliability_score")
+
+            return reliability_scores  # Return the full dictionary
+
+        except Exception as e:
+            print(f"Error fetching reliability scores for run {run_path}: {e}")
+            return {}
+
     def get_penalized_hotkeys(self, valid_validator_hotkeys, flag):
         """
         This function gets all allocated hotkeys from all validators.
@@ -635,3 +674,4 @@ class ComputeWandb:
         except Exception as e: 
             bt.logging.info(f"Run ID: {run.id}, Name: {run.name}, Error: {e}") 
             return []
+

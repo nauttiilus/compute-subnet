@@ -61,11 +61,13 @@ from compute.utils.subtensor import is_registered, get_current_block, calculate_
 from compute.utils.version import try_update, get_local_version, version2number, get_remote_version
 from compute.wandb.wandb import ComputeWandb
 from neurons.Validator.calculate_pow_score import calc_score_pog
-from neurons.Validator.database.allocate import update_miner_details, select_has_docker_miners_hotkey, get_miner_details
+from neurons.Validator.database.allocate import get_miner_reliability_score, update_miner_details, select_has_docker_miners_hotkey, get_miner_details
 from neurons.Validator.database.challenge import select_challenge_stats, update_challenge_details
 from neurons.Validator.database.miner import select_miners, purge_miner_entries, update_miners
 from neurons.Validator.pog import adjust_matrix_size, compute_script_hash, execute_script_on_miner, get_random_seeds, load_yaml_config, parse_merkle_output, receive_responses, send_challenge_indices, send_script_and_request_hash, parse_benchmark_output, identify_gpu, send_seeds, verify_merkle_proof_row, get_remote_gpu_info, verify_responses
 from neurons.Validator.database.pog import get_pog_specs, retrieve_stats, update_pog_stats, write_stats
+
+NI_WANDB_RUN_PATH = "neuralinternet/opencompute/0djlnjjs"
 
 class Validator:
     blocks_done: set = set()
@@ -91,7 +93,7 @@ class Validator:
     loop: AbstractEventLoop
 
     @property
-    def wallet(self) -> bt.wallet:
+    def wallet(self) -> bt.wallet: # type: ignore
         return self._wallet
 
     @property
@@ -329,6 +331,9 @@ class Validator:
         # Fetch allocated hotkeys and stats
         self.allocated_hotkeys = self.wandb.get_allocated_hotkeys(valid_validator_hotkeys, True)
         self.stats_allocated = self.wandb.get_stats_allocated(valid_validator_hotkeys, True)
+        reliability_scores = self.wandb.get_reliability_scores(NI_WANDB_RUN_PATH)
+
+        bt.logging.info(f"Reliability scores: {reliability_scores}")
 
         self._queryable_uids = self.get_queryable()
 
@@ -348,6 +353,9 @@ class Validator:
 
                 # Check GPU specs in our PoG DB
                 gpu_specs = get_pog_specs(self.db, hotkey)
+                reliability_score = reliability_scores.get(str(uid), 1.0)
+
+                bt.logging.info(f"uid: {uid}, rel score: {reliability_score}")
 
                 # If found in our local database
                 if gpu_specs is not None:
@@ -366,19 +374,20 @@ class Validator:
                 self.stats[uid]["score"] = score*100
                 self.stats[uid]["gpu_specs"] = gpu_specs
 
-                # Keep or override reliability_score if you want
-                if "reliability_score" not in self.stats[uid]:
-                    self.stats[uid]["reliability_score"] = 0
+                # Keep or override reliability_score
+                self.stats[uid]["reliability_score"] =  reliability_score
 
             except KeyError as e:
                 bt.logging.trace(f"KeyError occurred for UID {uid}: {str(e)}")
                 score = 0
+                reliability_score = 0
             except Exception as e:
                 bt.logging.trace(f"An unexpected exception occurred for UID {uid}: {str(e)}")
                 score = 0
+                reliability_score = 0
 
             # Keep a simple reference of scores
-            self.scores[uid] = score
+            self.scores[uid] = score*reliability_score
 
         write_stats(self.db, self.stats)
 

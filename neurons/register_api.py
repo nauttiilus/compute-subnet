@@ -53,9 +53,11 @@ from compute.utils.db import ComputeDb
 from compute.utils.parser import ComputeArgPaser
 from compute.wandb.wandb import ComputeWandb
 from neurons.Validator.database.allocate import (
+    reset_miner_reliability_score_hotkey,
     select_allocate_miners_hotkey,
     update_allocation_db,
     get_miner_details,
+    upsert_miner_reliability_score,
 )
 
 # Import FastAPI Libraries
@@ -669,6 +671,9 @@ class RegisterAPI:
                 allocated.uuid_key = info["uuid"]
                 allocated.ssh_command = f"ssh {info['username']}@{result['ip']} -p {str(info['port'])}"
                 allocated.miner_version = info.get("version", 0)
+
+                # Reset the miner reliability score to 1.0
+                reset_miner_reliability_score_hotkey(hotkey, hours=24)
                 update_allocation_db(result_hotkey, info, True)
                 await self._update_allocation_wandb()
 
@@ -3046,6 +3051,10 @@ class RegisterAPI:
 
                         if self.checking_allocated.count(hotkey) >= ALLOCATE_CHECK_COUNT:
                             deallocated_at = datetime.now(timezone.utc)
+
+                            # Set miner reliability to zero
+                            upsert_miner_reliability_score(hotkey, score=0, details=None)
+
                             # update the allocation table
                             update_allocation_db(hotkey, info, False)
                             await self._update_allocation_wandb()
